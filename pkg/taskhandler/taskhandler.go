@@ -98,6 +98,9 @@ func (handler *TaskHandler) restDirector(req *http.Request, modelName string, ve
 		log.WithError(err).Error("Error finding node for model")
 		return fmt.Errorf("Error finding node for model: %w", err)
 	}
+	if len(nodes) == 0 {
+		return fmt.Errorf("no available nodes for model %s:%s", modelName, version)
+	}
 	selectedNode := nodes[rand.Intn(len(nodes))]
 	selectedURL, err := url.Parse(fmt.Sprintf("http://%s:%d", selectedNode.Host, selectedNode.RestPort))
 	if err != nil {
@@ -149,10 +152,21 @@ func (handler *TaskHandler) getOrCreateConnection(grpcHost string) (*grpc.Client
 			// Re-check under write lock
 			if existing, ok := handler.grpcConnections.ConnMap[grpcHost]; ok && existing == conn {
 				log.Warnf("Evicting stale gRPC connection to %s (state: %s)", grpcHost, state)
-				conn.Close()
+				if err := conn.Close(); err != nil {
+					log.WithError(err).Warnf("Error closing stale gRPC connection to %s", grpcHost)
+				}
 				delete(handler.grpcConnections.ConnMap, grpcHost)
 			} else if ok {
-				return existing, nil
+				existState := existing.GetState()
+				if existState == connectivity.TransientFailure || existState == connectivity.Shutdown {
+					log.Warnf("Replacement connection to %s also stale (state: %s), re-dialing", grpcHost, existState)
+					if err := existing.Close(); err != nil {
+						log.WithError(err).Warnf("Error closing stale replacement connection to %s", grpcHost)
+					}
+					delete(handler.grpcConnections.ConnMap, grpcHost)
+				} else {
+					return existing, nil
+				}
 			}
 			return handler.dialAndStore(grpcHost)
 		}
@@ -176,10 +190,12 @@ func (handler *TaskHandler) dialAndStore(grpcHost string) (*grpc.ClientConn, err
 		grpc.WithConnectParams(grpc.ConnectParams{Backoff: backoff.DefaultConfig}),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(handler.maxGrpcMsgSize), grpc.MaxCallSendMsgSize(handler.maxGrpcMsgSize)),
 	)
-	if err == nil {
-		handler.grpcConnections.ConnMap[grpcHost] = conn
+	if err != nil {
+		log.WithError(err).Errorf("Failed to dial gRPC host %s", grpcHost)
+		return nil, err
 	}
-	return conn, err
+	handler.grpcConnections.ConnMap[grpcHost] = conn
+	return conn, nil
 }
 
 func (connMap *grpcConnMap) Close() error {

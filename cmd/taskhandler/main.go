@@ -59,6 +59,9 @@ func main() {
 				taskHandler.GrpcProxy.SetHealth(false)
 			}
 
+			// Allow k8s to propagate the unhealthy status before closing connections
+			time.Sleep(5 * time.Second)
+
 			if taskHandler != nil {
 				if err := taskHandler.Close(); err != nil {
 					log.WithError(err).Error("Error closing task handler")
@@ -103,7 +106,11 @@ func serveCache() (*cachemanager.CacheManager, *http.Server) {
 		}
 	}()
 
-	go cache.GrpcProxy.Listen(grpcPort)
+	go func() {
+		if err := cache.GrpcProxy.Listen(grpcPort); err != nil {
+			log.WithError(err).Fatal("Cache gRPC server error")
+		}
+	}()
 
 	return cache, cacheHTTPServer
 }
@@ -139,7 +146,11 @@ func serveProxy() (*taskhandler.TaskHandler, *http.Server, error) {
 			return nil, nil, err
 		}
 
-		go tHandler.GrpcProxy.Listen(grpcPort)
+		go func() {
+			if err := tHandler.GrpcProxy.Listen(grpcPort); err != nil {
+				log.WithError(err).Fatal("Proxy gRPC server error")
+			}
+		}()
 
 		proxyMux.HandleFunc("/v1/models/", tHandler.ServeRest())
 
